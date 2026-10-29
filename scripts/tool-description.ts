@@ -24,10 +24,12 @@ const res = await app.request("http://localhost/mcp", {
 });
 const { result } = await res.json();
 
-const tools = result.tools.map(({ name, description, inputSchema }: Record<string, unknown>) => ({
+// annotations carries readOnlyHint, which stops Copilot asking for confirmation on every call
+const tools = result.tools.map(({ name, description, inputSchema, annotations }: Record<string, unknown>) => ({
   name,
   description,
   inputSchema,
+  ...(annotations ? { annotations } : {}),
 }));
 await writeFile(values.out, JSON.stringify({ tools }, null, 2) + "\n");
 console.log(`Wrote ${tools.length} tools to ${values.out}`);
