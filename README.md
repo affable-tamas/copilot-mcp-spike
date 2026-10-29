@@ -97,7 +97,17 @@ Add these **web redirect URIs** (Authentication blade, or `az ad app update --we
 | Client | Redirect URI |
 | --- | --- |
 | M365 Copilot declarative agents and Cowork (OAuth registration in the Teams Developer Portal) | `https://teams.microsoft.com/api/platform/v1.0/oAuthRedirect` |
-| Copilot Studio (MCP onboarding wizard / custom connector) | Copy the redirect URL that the wizard shows after you save the connection |
+| Copilot Studio (MCP onboarding wizard / custom connector) | Generated per connector; see below |
+
+**Copilot Studio redirect URI.** When you add the MCP server in Copilot Studio (Tools → Add tool → Model Context
+Protocol) with OAuth 2.0, Copilot Studio creates a Power Platform custom connector for it. That connector gets its own
+OAuth callback URL, usually of the form `https://global.consent.azure-apim.net/redirect/<connector-id>`. The URL only
+exists once the connector has been created, so you can't register it in Entra ahead of time:
+
+1. Finish the "Add tool" wizard. It shows the **Redirect URL** after the server is created. You can also find it later
+   under the connector's **Security** tab in Power Apps (make.powerapps.com → Custom connectors) or Power Automate.
+2. Add that exact URL as a web redirect URI on the app registration.
+3. Create the connection (sign in). Until step 2 is done, sign-in fails with `AADSTS50011` (redirect URI mismatch).
 
 The OAuth values Copilot asks for:
 
@@ -155,7 +165,8 @@ OAuth registration (`OAuthPluginVault`) using the values above. Roughly, the gen
 ```
 
 **Copilot Studio:** Tools → Add tool → Model Context Protocol. Enter the server URL, choose OAuth 2.0 (manual),
-and fill in the table above. Then add the copied redirect URI to the app registration.
+and fill in the table above. Then register the connector's redirect URL on the app registration, as described in
+[Entra ID app registration](#entra-id-app-registration).
 
 **Copilot Cowork:** register the server as a connector in a Cowork plugin. Its auth is declared under the
 Microsoft 365 app manifest's `agentConnectors` node, using the same OAuth registration model as declarative-agent
