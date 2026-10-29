@@ -1,0 +1,35 @@
+# yaml-language-server: $schema=https://aka.ms/m365-agents-toolkits/v1.13/yaml.schema.json
+# Registers the OAuth client in the Teams Developer Portal (the OAuthPluginVault referenceId) and builds
+# the Cowork plugin zip. Run from this folder: atk provision --env dev
+version: v1.13
+environmentFolderPath: ./env
+
+provision:
+  - uses: oauth/register
+    with:
+      name: copilot-mcp-spike
+      # Required by the action; only used when applicableToApps is SpecificApp
+      appId: ${{TEAMS_APP_ID}}
+      baseUrl: ${{MCP_BASE_URL}}/mcp
+      flow: authorizationCode
+      identityProvider: Custom
+      authorizationUrl: https://login.microsoftonline.com/${{ENTRA_TENANT_ID}}/oauth2/v2.0/authorize
+      tokenUrl: https://login.microsoftonline.com/${{ENTRA_TENANT_ID}}/oauth2/v2.0/token
+      refreshUrl: https://login.microsoftonline.com/${{ENTRA_TENANT_ID}}/oauth2/v2.0/token
+      # atk splits scopes on commas
+      scope: api://${{ENTRA_CLIENT_ID}}/access_as_user,offline_access
+      clientId: ${{ENTRA_CLIENT_ID}}
+      clientSecret: ${{SECRET_ENTRA_CLIENT_SECRET}}
+      isPKCEEnabled: true
+      # Cowork requires "Any Microsoft 365 organization" and "Any Teams app"
+      targetAudience: AnyTenant
+      applicableToApps: AnyApp
+    writeToEnvironmentFile:
+      configurationId: OAUTH_CONFIGURATION_ID
+
+  - uses: teamsApp/zipAppPackage
+    with:
+      manifestPath: ./appPackage/manifest.json
+      outputZipPath: ./appPackage/build/copilot-mcp-spike-cowork.${{TEAMSFX_ENV}}.zip
+      outputFolder: ./appPackage/build
+projectId: 1a3ff51e-9a11-41c9-805d-ce7a4fe65b84

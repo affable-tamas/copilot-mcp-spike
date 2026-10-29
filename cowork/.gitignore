@@ -1,0 +1,3 @@
+env/.env.*.user
+appPackage/build/
+.DS_Store

@@ -1,0 +1,45 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/teams/v1.28/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.28",
+  "version": "1.0.0",
+  "id": "${{TEAMS_APP_ID}}",
+  "developer": {
+    "name": "Affable Co.",
+    "websiteUrl": "${{MCP_BASE_URL}}",
+    "privacyUrl": "${{MCP_BASE_URL}}/privacy",
+    "termsOfUseUrl": "${{MCP_BASE_URL}}/terms"
+  },
+  "name": {
+    "short": "Copilot MCP spike",
+    "full": "Copilot MCP spike for Copilot Cowork"
+  },
+  "description": {
+    "short": "Shows which Microsoft 365 user the MCP server sees.",
+    "full": "Test plugin for the copilot-mcp-spike MCP server. It signs in with Entra ID and calls the server's whoami and greet tools to show the signed-in user's identity as the server sees it."
+  },
+  "icons": {
+    "color": "color.png",
+    "outline": "outline.png"
+  },
+  "accentColor": "#2B579A",
+  "agentSkills": [
+    { "folder": "./skills/copilot-mcp-spike-identity" }
+  ],
+  "agentConnectors": [
+    {
+      "id": "copilot-mcp-spike",
+      "displayName": "Copilot MCP spike",
+      "description": "Identifies the signed-in Microsoft 365 user.",
+      "toolSource": {
+        "remoteMcpServer": {
+          "mcpServerUrl": "${{MCP_BASE_URL}}/mcp",
+          "mcpToolDescription": { "file": "toolDescription.json" },
+          "authorization": {
+            "type": "OAuthPluginVault",
+            "referenceId": "${{OAUTH_CONFIGURATION_ID}}"
+          }
+        }
+      }
+    }
+  ]
+}

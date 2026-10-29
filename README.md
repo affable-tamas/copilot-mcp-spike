@@ -26,6 +26,7 @@ src/
 scripts/            dev-token.ts (get a local token), smoke.ts (end-to-end MCP client check),
                     tool-description.ts (toolDescription.json for Microsoft 365 app packages)
 test/               vitest tests (no network needed)
+cowork/             Copilot Cowork plugin (skill + connector) for the dev deployment; see "The cowork/ plugin"
 ```
 
 ## Run locally
@@ -258,13 +259,74 @@ A Cowork plugin is a Microsoft 365 app package with a skill (`skills/<name>/SKIL
   dynamically and ignores the file. Generate it from the server with `npm run tool-description` so it stays in sync.
 - Scaffold, validate and package with the `wiqd` CLI (`wiqd plugin create`, `wiqd plugin add connector`,
   `wiqd plugin validate --mode deep`). Then upload through the Microsoft 365 admin center, or sideload with
-  `atk install --file-path <zip> --scope Personal`.
+  `atk install --file-path <zip> --scope Personal`. This repo's plugin is built with `atk` instead; see below.
 - **Known issue.** A [Microsoft Q&A thread](https://learn.microsoft.com/en-gb/answers/questions/5919386/m365-copilot-cowork-frontier-remote-mcp-connector)
   (June to August 2026) reports Cowork tool calls failing after a successful OAuth sign-in. No authenticated tool
   call reaches the server, while the same config works in Copilot Chat. There's no official fix. The `auth_failed`
   and `mcp_request` log lines show whether a token arrives.
 - One write-up (May 2026) needed the app registrations set to multi-tenant before Cowork's **Connect** worked. The
   server still accepts only `ENTRA_TENANT_ID` unless `ENTRA_ALLOWED_TENANTS` says otherwise.
+
+#### The `cowork/` plugin in this repo
+
+`cowork/` is a working Cowork plugin for the dev deployment (`copilot-mcp-spike-dev.azurewebsites.net`). It has one
+skill (`copilot-mcp-spike-identity`, which calls `whoami` and `greet`) and the connector above. It's an Agents
+Toolkit project, so you only need the `atk` CLI (`npm install -g @microsoft/m365agentstoolkit-cli`), not `wiqd`.
+
+```
+cowork/
+  m365agents.yml             provision: oauth/register (Developer Portal auth config), then teamsApp/zipAppPackage
+  env/.env.dev               URL, tenant, client ID, Teams app ID, and OAUTH_CONFIGURATION_ID once provisioned
+  env/.env.dev.user          SECRET_ENTRA_CLIENT_SECRET (gitignored; create it yourself)
+  appPackage/manifest.json   Manifest v1.28 with ${{...}} placeholders filled from env/
+  appPackage/skills/copilot-mcp-spike-identity/SKILL.md
+  appPackage/toolDescription.json, color.png, outline.png
+  appPackage/build/          Output zip (gitignored)
+```
+
+**Build the zip.** Run these from `cowork/`:
+
+```bash
+echo 'SECRET_ENTRA_CLIENT_SECRET=<client secret>' > env/.env.dev.user   # first time only
+atk auth login m365                                                    # Developer Portal access
+atk provision --env dev       # -> appPackage/build/copilot-mcp-spike-cowork.dev.zip
+atk validate --package-file appPackage/build/copilot-mcp-spike-cowork.dev.zip
+```
+
+- **First run.** `oauth/register` creates the Developer Portal auth config, using the settings Cowork needs: Any
+  Teams app, Any Microsoft 365 organization, PKCE on, and scope `api://<client-id>/access_as_user offline_access`.
+  The action splits scopes on commas, so `m365agents.yml` lists them comma-separated. It writes the registration ID
+  to `OAUTH_CONFIGURATION_ID` in `env/.env.dev`, and the manifest's `referenceId` comes from there.
+- **Later runs.** The existing registration is kept and only the zip is rebuilt. To create a new registration,
+  delete the `OAUTH_CONFIGURATION_ID` line first.
+
+**Install it.** Sideload it for yourself:
+
+```bash
+atk install --file-path appPackage/build/copilot-mcp-spike-cowork.dev.zip --scope Personal
+```
+
+`atk install` prints a `TitleId` and an `AppId`; save them. You can also upload the zip for the whole tenant in the
+Microsoft 365 admin center (Manage apps → Upload custom app). The plugin then shows up in Cowork under Sources &
+Skills → Plugins. Sign in to the connector there, then ask "who am I?".
+
+**Change it:**
+
+- **Skill or manifest text.** Edit the files under `appPackage/` and bump `version` in `manifest.json`. Then run
+  `atk provision --env dev` and `atk install` again. Keep the `TEAMS_APP_ID` (the manifest `id`) stable, so the new
+  package updates the installed app instead of adding a second one.
+- **Server tools.** Run `npm run tool-description -- --out cowork/appPackage/toolDescription.json` from the repo
+  root, then rebuild the zip.
+- **Another deployment.** Copy `env/.env.dev` to `env/.env.<name>` and change `MCP_BASE_URL` and the Entra IDs.
+  Remove `OAUTH_CONFIGURATION_ID`, and use a new `TEAMS_APP_ID` (`uuidgen`). Then run `atk provision --env <name>`.
+  The auth config's base URL must match the connector's `mcpServerUrl`, so each server URL needs its own registration.
+- **Client secret rotation.** The Developer Portal registration stores its own copy of the secret, so updating
+  `env/.env.dev.user` isn't enough. Also update the secret in the [Developer Portal](https://dev.teams.microsoft.com)
+  under Tools → OAuth client registration.
+- **Uninstall.** Run `atk uninstall --mode title-id --title-id <TitleId>`.
+
+The manifest's privacy and terms URLs (`/privacy`, `/terms`) aren't served by the app. That's fine for
+sideloading, but store validation would fail.
 
 ### Copilot Studio
 
