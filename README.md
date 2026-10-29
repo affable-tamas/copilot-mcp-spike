@@ -93,7 +93,9 @@ az ad sp create --id $APP_ID
 # The app is also the OAuth client, so it requests a delegated permission to its own scope.
 # Without this, sign-in can fail with AADSTS650057 (resource not listed in the client's required permissions).
 az ad app permission add --id $APP_ID --api $APP_ID --api-permissions $SCOPE_ID=Scope
-az ad app permission admin-consent --id $APP_ID
+# Tenant-wide (admin) consent for that permission. --scope takes the scope's value, not its ID.
+az ad app permission grant --id $APP_ID --api $APP_ID --scope access_as_user
+az ad app permission list-grants --id $APP_ID --query "[].scope" -o tsv   # should print: access_as_user
 
 # Client secret for the Copilot OAuth configuration
 az ad app credential reset --id $APP_ID --display-name copilot --query password -o tsv
