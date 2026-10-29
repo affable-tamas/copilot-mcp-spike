@@ -23,7 +23,8 @@ src/
   auth/entra.ts     Entra ID access-token verifier
   auth/dev.ts       Local token issuer that mints Entra-shaped tokens for offline testing
   auth/identity.ts  UserIdentity type and claim mapping
-scripts/            dev-token.ts (get a local token), smoke.ts (end-to-end MCP client check)
+scripts/            dev-token.ts (get a local token), smoke.ts (end-to-end MCP client check),
+                    tool-description.ts (toolDescription.json for Microsoft 365 app packages)
 test/               vitest tests (no network needed)
 ```
 
@@ -88,39 +89,67 @@ az rest --method PATCH --url "https://graph.microsoft.com/v1.0/applications/$OBJ
 }"
 az ad sp create --id $APP_ID
 
+# The app is also the OAuth client, so it requests a delegated permission to its own scope.
+# Without this, sign-in can fail with AADSTS650057 (resource not listed in the client's required permissions).
+az ad app permission add --id $APP_ID --api $APP_ID --api-permissions $SCOPE_ID=Scope
+az ad app permission admin-consent --id $APP_ID
+
 # Client secret for the Copilot OAuth configuration
 az ad app credential reset --id $APP_ID --display-name copilot --query password -o tsv
 ```
 
-Add these **web redirect URIs** (Authentication blade, or `az ad app update --web-redirect-uris ...`):
+With `requestedAccessTokenVersion: 2`, the token's `aud` is the client ID, whichever App ID URI the scope was
+requested through. The server also accepts `api://<client-id>` (or `ENTRA_APP_ID_URI`) for v1 tokens.
+
+**Redirect URIs.** Add these on the app registration (Authentication → Web):
 
 | Client | Redirect URI |
 | --- | --- |
-| M365 Copilot declarative agents and Cowork (OAuth registration in the Teams Developer Portal) | `https://teams.microsoft.com/api/platform/v1.0/oAuthRedirect` |
-| Copilot Studio (MCP onboarding wizard / custom connector) | Generated per connector; see below |
+| Copilot Chat declarative agents and Cowork, OAuth 2.0 auth config | `https://teams.microsoft.com/api/platform/v1.0/oAuthRedirect` |
+| Copilot Chat declarative agents and Cowork, Entra SSO auth config | `https://teams.microsoft.com/api/platform/v1.0/oAuthConsentRedirect` |
+| Copilot Studio | The connector's callback URL; see below |
 
-**Copilot Studio redirect URI.** When you add the MCP server in Copilot Studio (Tools → Add tool → Model Context
-Protocol) with OAuth 2.0, Copilot Studio creates a Power Platform custom connector for it. That connector gets its own
-OAuth callback URL, usually of the form `https://global.consent.azure-apim.net/redirect/<connector-id>`. The URL only
-exists once the connector has been created, so you can't register it in Entra ahead of time:
+The Teams redirect URI is the same for every plugin and provider. If it isn't registered, sign-in fails.
 
-1. Finish the "Add tool" wizard. It shows the **Redirect URL** after the server is created. You can also find it later
-   under the connector's **Security** tab in Power Apps (make.powerapps.com → Custom connectors) or Power Automate.
-2. Add that exact URL as a web redirect URI on the app registration.
-3. Create the connection (sign in). Until step 2 is done, sign-in fails with `AADSTS50011` (redirect URI mismatch).
+**Copilot Studio callback URL.** When you add the MCP server in Copilot Studio (Tools → Add a tool → New tool →
+Model Context Protocol) with OAuth 2.0 → Manual, Copilot Studio creates a Power Platform custom connector for it.
+That connector gets its own callback URL, of the form
+`https://global.consent.azure-apim.net/redirect/<connector-name>-<id>`. The URL only exists once the connector has
+been created, so you can't register it in Entra ahead of time:
 
-The OAuth values Copilot asks for:
+1. Select **Create** in the wizard. A callback URL appears. You can also find it later as the **Redirect URL** on
+   the connector's **Security** tab (Power Apps or Power Automate → Custom connectors).
+2. Add that exact URL as a web redirect URI on the app registration. The URL doesn't change when you update the
+   connector, but exporting the connector to another environment creates a new one.
+3. Create the connection (sign in). Until step 2 is done, sign-in fails with Entra's redirect URI mismatch error
+   (`AADSTS50011`).
+
+**OAuth values.** Copilot asks for these:
 
 | Field | Value |
 | --- | --- |
 | Authorization URL | `https://login.microsoftonline.com/<tenant-id>/oauth2/v2.0/authorize` |
 | Token URL | `https://login.microsoftonline.com/<tenant-id>/oauth2/v2.0/token` |
-| Refresh URL | same as token URL |
-| Client ID / secret | from above |
+| Refresh URL | Same as the token URL |
+| Client ID / secret | From above |
 | Scope | `api://<client-id>/access_as_user offline_access` |
 
-Entra ID doesn't support dynamic client registration, so configure the client manually. Don't rely on
-automatic discovery.
+`offline_access` lets the Microsoft 365 token store refresh tokens. Entra ID has no dynamic client registration
+(RFC 7591) endpoint, so the "Dynamic" and "Dynamic discovery" options in Copilot Studio and "OAuth (with dynamic
+registration)" in Agents Toolkit don't work with it. Use static (manual) registration.
+
+### The `resource` parameter and generic MCP clients
+
+Clients that follow the MCP authorization spec, such as VS Code and MCP Inspector's OAuth flow, send
+`resource=<server URL>/mcp` to Entra together with the `api://<client-id>/access_as_user` scope. Entra rejects
+this with `AADSTS9010010` ("The resource parameter provided in the request doesn't match with the requested
+scopes"), because the resource doesn't match the scope's App ID URI. The only clean fix is an App ID URI equal to the
+server URL, for example `https://mcp.contoso.com/mcp`. Entra allows https App ID URIs only on a tenant-verified
+domain, and `*.azurewebsites.net` can't be verified. So you need a custom domain on App Service, and you set
+`ENTRA_APP_ID_URI=https://mcp.contoso.com/mcp`.
+
+Copilot Chat, Cowork and Copilot Studio use the scope configured in their OAuth settings and don't run into this.
+You only need the custom domain if generic MCP clients also have to sign in on their own.
 
 ## Deploy to Azure App Service (Linux, Node 22)
 
@@ -141,42 +170,124 @@ git archive -o app.zip HEAD
 az webapp deploy -g $RG -n $APP --src-path app.zip --type zip
 ```
 
-- Leave **App Service Authentication (Easy Auth) off**. The app validates tokens itself and has to return its own
-  `401` with `WWW-Authenticate` so MCP clients can discover how to authenticate. Easy Auth would redirect or
-  answer with its own response instead.
+- Leave **App Service Authentication (Easy Auth) off**. The app validates tokens and serves the protected resource
+  metadata itself, so it runs the same way locally and on Azure.
+  - App Service also has built-in MCP server authorization (preview). It serves the metadata from the
+    `WEBSITE_AUTH_PRM_DEFAULT_WITH_SCOPES` app setting and validates tokens before they reach the app.
+  - If you switch to that, make sure the Copilot client app is allowed in Easy Auth's authorization policy. The
+    default policy only allows tokens the app obtained itself.
+  - That path hasn't been tested with this server.
 - The public base URL defaults to `https://$WEBSITE_HOSTNAME`. Set `PUBLIC_BASE_URL` if you use a custom domain.
 - Logs: `az webapp log tail -g $RG -n $APP`. Look for `mcp_request` and `auth_failed` entries.
 - Check it: `npm run smoke -- --url https://$APP.azurewebsites.net --token "$(az account get-access-token --scope api://$APP_ID/access_as_user --query accessToken -o tsv)"`
 
 ## Connect from Copilot
 
-**Copilot Chat via a declarative agent (Microsoft 365 Agents Toolkit):** use *Add Action → Start with an MCP server*,
-enter `https://<app>.azurewebsites.net/mcp`, and pick OAuth. The toolkit generates the plugin manifest and an
-OAuth registration (`OAuthPluginVault`) using the values above. Roughly, the generated runtime looks like this
-(regenerate with the toolkit rather than hand-editing):
+Copilot Chat (declarative agents) and Cowork share one OAuth auth config, stored in the Microsoft Enterprise token
+store and referenced by ID. Copilot Studio has its own connection. All of them use Streamable HTTP. Copilot Studio
+dropped SSE in August 2025.
+
+### Teams Developer Portal auth config (Copilot Chat and Cowork)
+
+Agents Toolkit creates this for you. You can also create it in the [Teams Developer Portal](https://dev.teams.microsoft.com)
+under Tools → OAuth client registration. Either way, check these settings:
+
+- **Base URL**: the MCP server URL (`https://<app>.azurewebsites.net/mcp`). If it doesn't match the server URL in
+  the manifest, sign-in fails with "The base URL in your authentication configuration does not match the server URL".
+- **Restrict usage by app**: **Any Teams app**. A registration bound to a specific Teams app ID provisions
+  successfully, but then every tool call returns 404.
+- **Restrict usage by org**: **Any Microsoft 365 organization** for Cowork. The Cowork docs require it, even for a
+  single tenant.
+- **Client ID**: watch for stray whitespace. One reported Cowork failure (tool calls failing after a successful sign-in)
+  was traced to a trailing space in the client ID.
+- **PKCE** is on by default. Leave it on.
+
+The registration ID it produces is the `reference_id` / `referenceId` used in the manifests below.
+
+**Entra SSO** instead of OAuth (no sign-in prompt, no client secret) needs these extra steps:
+
+- Add the Application ID URI that the portal generates to the app registration's `identifierUris`, using the
+  manifest editor.
+- Add the `oAuthConsentRedirect` redirect URI.
+- Pre-authorize the Microsoft Enterprise token store client `ab3be6b7-f5df-413d-ac2d-abf1e3fd9c0b` on the
+  `access_as_user` scope.
+
+Tokens still arrive as normal v2 tokens with `aud` = client ID, so the server needs no change. `azp` is then the
+token store's client ID.
+
+### Copilot Chat via a declarative agent (Microsoft 365 Agents Toolkit 6.12+)
+
+1. Create a new agent: **Declarative Agent**, then **Add an Action → Start with an MCP Server**.
+2. Enter `https://<app>.azurewebsites.net/mcp`.
+3. Pick **OAuth (with static registration)** and enter the client ID, secret and scope. You can pick **Entra SSO**
+   instead.
+
+The toolkit reads the authorization and token endpoints from the server's well-known metadata
+(`/.well-known/oauth-protected-resource`). It then creates the auth config and writes it into `ai-plugin.json`:
 
 ```json
-"runtimes": [{
-  "type": "RemoteMCPServer",
-  "spec": { "url": "https://<app>.azurewebsites.net/mcp" },
-  "run_for_functions": ["whoami", "greet"],
-  "auth": { "type": "OAuthPluginVault", "reference_id": "<oauth-registration-id>" }
+"auth": { "type": "OAuthPluginVault", "reference_id": "<auth config ID>" }
+```
+
+The generated manifest discovers tools dynamically at runtime. Users can sign out under Chat settings → Agents.
+
+### Copilot Cowork (plugin)
+
+A Cowork plugin is a Microsoft 365 app package with a skill (`skills/<name>/SKILL.md`) and a connector under
+`agentConnectors`. Cowork reuses the same auth config as the declarative agent:
+
+```json
+"agentConnectors": [{
+  "id": "copilot-mcp-spike",
+  "displayName": "Copilot MCP spike",
+  "description": "Identifies the signed-in user.",
+  "toolSource": {
+    "remoteMcpServer": {
+      "mcpServerUrl": "https://<app>.azurewebsites.net/mcp",
+      "authorization": { "type": "OAuthPluginVault", "referenceId": "<auth config ID>" },
+      "mcpToolDescription": { "file": "toolDescription.json" }
+    }
+  }
 }]
 ```
 
-**Copilot Studio:** Tools → Add tool → Model Context Protocol. Enter the server URL, choose OAuth 2.0 (manual),
-and fill in the table above. Then register the connector's redirect URL on the app registration, as described in
-[Entra ID app registration](#entra-id-app-registration).
+- `agentConnectors` has no Entra-specific authorization type, so use `OAuthPluginVault`. It can reference either an
+  OAuth or an Entra SSO auth config.
+- **Tool description file.** At manifest version 1.28, `mcpToolDescription` is required and the file must be in the
+  zip. At 1.29 (what `wiqd plugin create` generates) it's optional. The Cowork docs say Cowork discovers tools
+  dynamically and ignores the file. Generate it from the server with `npm run tool-description` so it stays in sync.
+- Scaffold, validate and package with the `wiqd` CLI (`wiqd plugin create`, `wiqd plugin add connector`,
+  `wiqd plugin validate --mode deep`). Then upload through the Microsoft 365 admin center, or sideload with
+  `atk install --file-path <zip> --scope Personal`.
+- **Known issue.** A [Microsoft Q&A thread](https://learn.microsoft.com/en-gb/answers/questions/5919386/m365-copilot-cowork-frontier-remote-mcp-connector)
+  (June to August 2026) reports Cowork tool calls failing after a successful OAuth sign-in. No authenticated tool
+  call reaches the server, while the same config works in Copilot Chat. There's no official fix. The `auth_failed`
+  and `mcp_request` log lines show whether a token arrives.
+- One write-up (May 2026) needed the app registrations set to multi-tenant before Cowork's **Connect** worked. The
+  server still accepts only `ENTRA_TENANT_ID` unless `ENTRA_ALLOWED_TENANTS` says otherwise.
 
-**Copilot Cowork:** register the server as a connector in a Cowork plugin. Its auth is declared under the
-Microsoft 365 app manifest's `agentConnectors` node, using the same OAuth registration model as declarative-agent
-plugins, so the OAuth registration above can be reused.
+### Copilot Studio
+
+1. Go to Tools → Add a tool → New tool → **Model Context Protocol**.
+2. Enter the server name, description and URL.
+3. Choose OAuth 2.0 → **Manual** and enter the client ID, client secret, authorization URL, token URL template,
+   refresh URL and scopes.
+4. Register the callback URL as described above, then create the connection.
+
+Generative orchestration must be on. Known limitations:
+
+- Copilot Studio supports MCP tools and resources, not prompts.
+- `enum` inputs are treated as plain strings.
+- Tools with `$ref` inputs are dropped.
+- Multi-type `type` arrays get truncated.
 
 ### Tell the clients apart
 
-`whoami` returns `clientAppId` (the token's `azp`/`appid`) and the `User-Agent`. The `initialize` log line
-records `clientInfo` too. If Chat and Cowork use different OAuth registrations, `clientAppId` tells them apart reliably.
-Otherwise, use the logged `clientInfo` and `User-Agent` values once you have seen what each surface sends.
+`whoami` returns `clientAppId` (the token's `azp`/`appid`) and the `User-Agent`. The `initialize` log line also
+records `clientInfo`. With an OAuth auth config, `azp` is your own client ID on every Copilot surface, so it doesn't
+separate Copilot Chat from Cowork. Use the logged `clientInfo` and `User-Agent` values once you have seen what each
+surface sends. If you need a hard split, give each surface its own auth config backed by a separate client app
+registration.
 
 ## Configuration
 
@@ -194,6 +305,25 @@ Otherwise, use the logged `clientInfo` and `User-Agent` values once you have see
 
 ## Next steps
 
-- **Call Microsoft Graph or other APIs as the user:** exchange the incoming token with the on-behalf-of flow
-  (`@azure/msal-node` `acquireTokenOnBehalfOf`). The token and identity are already on `extra.authInfo`.
+- **Call Microsoft Graph or other APIs as the user:** get a new token with the on-behalf-of flow
+  (`@azure/msal-node` `acquireTokenOnBehalfOf`). Never forward the incoming token. The token and identity are already
+  on `extra.authInfo`. If the downstream API needs consent, return 401 so Copilot prompts the user to sign in again.
 - Use `oid` (together with `tid`) as the key for per-user data. `username` can change.
+
+## Sources
+
+- Microsoft Learn: [Build an MCP plugin for a declarative agent](https://learn.microsoft.com/en-us/microsoft-365/copilot/extensibility/build-mcp-plugins),
+  [Plugin authentication](https://learn.microsoft.com/en-us/microsoft-365/copilot/extensibility/plugin-authentication),
+  [OAuth 2.0](https://learn.microsoft.com/en-us/microsoft-365/copilot/extensibility/plugin-authentication-oauth),
+  [Entra SSO](https://learn.microsoft.com/en-us/microsoft-365/copilot/extensibility/plugin-authentication-entra-sso),
+  [Auth troubleshooting](https://learn.microsoft.com/en-us/microsoft-365/copilot/extensibility/plugin-authentication-troubleshooting),
+  [Remote MCP servers in agentConnectors](https://learn.microsoft.com/en-us/microsoft-365/copilot/extensibility/configure-plugin-mcp-servers),
+  [Cowork plugin development](https://learn.microsoft.com/en-us/microsoft-365/copilot/cowork/cowork-plugin-development)
+- Microsoft Learn: [Copilot Studio: connect to an existing MCP server](https://learn.microsoft.com/en-us/microsoft-copilot-studio/mcp-add-existing-server-to-agent),
+  [Copilot Studio MCP troubleshooting](https://learn.microsoft.com/en-us/microsoft-copilot-studio/mcp-troubleshooting),
+  [Custom connector redirect URL](https://learn.microsoft.com/en-us/connectors/custom-connectors/azure-active-directory-authentication),
+  [App Service built-in MCP authorization](https://learn.microsoft.com/en-us/azure/app-service/configure-authentication-mcp)
+- Community: [MCP with Entra auth + Copilot & Cowork](https://nullpointer.se/copilot-cowork-oauth.html) (July 2026),
+  [Secure MCP-powered Cowork plugins](https://simondoy.com/2026/05/30/my-experiences-build-secure-mcp-powered-copilot-cowork-plugins/) (May 2026),
+  [Cowork MCP connector](https://www.developerscantina.com/p/cowork-mcp-connector/),
+  [Q&A: Cowork OAuthPluginVault tool calls fail](https://learn.microsoft.com/en-gb/answers/questions/5919386/m365-copilot-cowork-frontier-remote-mcp-connector)

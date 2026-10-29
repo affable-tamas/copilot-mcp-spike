@@ -15,7 +15,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "token": "tsx scripts/dev-token.ts",
-    "smoke": "tsx scripts/smoke.ts"
+    "smoke": "tsx scripts/smoke.ts",
+    "tool-description": "tsx scripts/tool-description.ts"
   },
   "dependencies": {
     "@hono/node-server": "^2.1.5",
